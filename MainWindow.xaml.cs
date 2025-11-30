@@ -236,17 +236,19 @@ namespace WindowScatter
                         {
                             if (this.Visibility == Visibility.Hidden)
                             {
+                                await StartScatterAsync();
                                 this.Visibility = Visibility.Visible;
                                 this.Activate();
                                 this.Focus();
 
                                 await System.Threading.Tasks.Task.Delay(50);
-                                await StartScatterAsync();
+                                
 
                                 // NOW release the Windows key after overlay is fully active
-                                await System.Threading.Tasks.Task.Delay(100); // Additional safety delay
+                                await System.Threading.Tasks.Task.Delay(200);
                                 ReleaseWindowsKey();
                             }
+
                         }));
 
                         return (IntPtr)1; // Consume the key press
@@ -807,6 +809,53 @@ namespace WindowScatter
                     placedWindows.Add(bestRect);
                 }
             } // Close the else block for 3+ windows
+
+            // PROXIMITY-BASED ASSIGNMENT - match windows to nearest scattered positions
+            // This prevents windows from flying across the entire screen and overlapping during animation
+
+            var assignedLayouts = new List<WindowLayout>();
+            var availableLayouts = new List<WindowLayout>(layouts);
+
+            foreach (var win in windows)
+            {
+                // Calculate center of window's original position
+                double winCenterX = (win.OriginalRect.Left + win.OriginalRect.Right) / 2.0;
+                double winCenterY = (win.OriginalRect.Top + win.OriginalRect.Bottom) / 2.0;
+
+                // Find the closest available layout position
+                WindowLayout closestLayout = null;
+                double minDistance = double.MaxValue;
+
+                foreach (var layout in availableLayouts)
+                {
+                    // Calculate center of target position
+                    double layoutCenterX = layout.X + (layout.Width / 2.0);
+                    double layoutCenterY = layout.Y + (layout.Height / 2.0);
+
+                    // Calculate distance
+                    double dx = layoutCenterX - winCenterX;
+                    double dy = layoutCenterY - winCenterY;
+                    double distance = Math.Sqrt(dx * dx + dy * dy);
+
+                    if (distance < minDistance)
+                    {
+                        minDistance = distance;
+                        closestLayout = layout;
+                    }
+                }
+
+                // Assign this window to the closest layout
+                if (closestLayout != null)
+                {
+                    closestLayout.Window = win; // Link the window to this layout
+                    assignedLayouts.Add(closestLayout);
+                    availableLayouts.Remove(closestLayout);
+                }
+            }
+
+            // Replace layouts list with the proximity-matched one
+            layouts = assignedLayouts;
+            layouts.Reverse();
 
             // Make sure our overlay is topmost
             SetWindowPos(ourHwnd, HWND_TOPMOST, 0, 0, 0, 0,
