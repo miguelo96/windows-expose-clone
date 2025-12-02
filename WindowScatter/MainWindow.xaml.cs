@@ -4,11 +4,12 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
-using System.Windows.Controls;
+using System.Windows.Threading;
 using static WindowScatter.Win32Interop;
 
 namespace WindowScatter
@@ -32,6 +33,7 @@ namespace WindowScatter
         private DateTime animStart;
         private DateTime lastDwmUpdate = DateTime.MinValue;
         private double currentBlurRadius = 0;
+        private bool isReturningToOriginal = false;
 
         // Hotkey state
         private IntPtr hookID = IntPtr.Zero;
@@ -580,17 +582,184 @@ namespace WindowScatter
 
         private void SwitchToWindow(IntPtr windowHandle)
         {
+            // Yes Windows, wake the hell up
             ShowWindow(windowHandle, SW_RESTORE);
             SetForegroundWindow(windowHandle);
 
-            Cleanup();
-            this.Visibility = Visibility.Hidden;
+            var clickedThumb = windowThumbs.FirstOrDefault(t => t.WindowHandle == windowHandle);
+            if (clickedThumb == null)
+                return;
+
+            // Bring its Border to the top of the canvas z-order
+            ScatterCanvas.Children.Remove(clickedThumb.ClickBorder);
+            ScatterCanvas.Children.Add(clickedThumb.ClickBorder);
+
+            // Maintain order in the list
+            windowThumbs.Remove(clickedThumb);
+            windowThumbs.Add(clickedThumb);
+
+            // Now enforce Z-order because Windows is a gremlin
+            SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+            SetWindowPos(windowHandle, HWND_NOTOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+            // Give Windows a microsecond to stop tripping over itself
+            Task.Delay(10).ContinueWith(_ =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    // Recapture ACTUAL position of every window
+                    foreach (var thumb in windowThumbs)
+                    {
+                        RECT rect;
+                        if (GetWindowRect(thumb.WindowHandle, out rect))
+                        {
+                            thumb.StartX = rect.Left;
+                            thumb.StartY = rect.Top;
+                            thumb.StartWidth = rect.Right - rect.Left;
+                            thumb.StartHeight = rect.Bottom - rect.Top;
+                        }
+
+                        // Re-register the thumbnail so DWM stops gaslighting you
+                        if (thumb.ThumbnailHandle != IntPtr.Zero)
+                            DwmUnregisterThumbnail(thumb.ThumbnailHandle);
+
+                        IntPtr newThumb;
+                        if (DwmRegisterThumbnail(new WindowInteropHelper(this).Handle,
+                            thumb.WindowHandle, out newThumb) == 0)
+                        {
+                            thumb.ThumbnailHandle = newThumb;
+                            UpdateThumbnailPosition(thumb);
+                        }
+                    }
+
+                    // Now we can safely animate back
+                    AnimateBackToOriginal(() =>
+                    {
+                        this.Visibility = Visibility.Hidden;
+
+                        Dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            Cleanup();
+                            SetForegroundWindow(windowHandle);
+                        }), DispatcherPriority.Background);
+                    });
+                });
+            });
         }
+
 
         private void CleanupAndClose()
         {
-            Cleanup();
-            this.Visibility = Visibility.Hidden;
+            AnimateBackToOriginal(() =>
+            {
+                this.Visibility = Visibility.Hidden;
+
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    Cleanup();
+                }), System.Windows.Threading.DispatcherPriority.Background);
+            });
+        }
+
+        private void AnimateBackToOriginal(Action onComplete)
+        {
+            isReturningToOriginal = true;
+
+            // Swap Start/Target so animation goes backwards
+            foreach (var thumb in windowThumbs)
+            {
+                // Remember current position
+                double tempX = thumb.StartX;
+                double tempY = thumb.StartY;
+                double tempW = thumb.StartWidth;
+                double tempH = thumb.StartHeight;
+
+                // Start from current scattered position
+                thumb.StartX = thumb.TargetX;
+                thumb.StartY = thumb.TargetY;
+                thumb.StartWidth = thumb.TargetWidth;
+                thumb.StartHeight = thumb.TargetHeight;
+
+                // Target is original position
+                thumb.TargetX = tempX;
+                thumb.TargetY = tempY;
+                thumb.TargetWidth = tempW;
+                thumb.TargetHeight = tempH;
+
+                // Reset current to start
+                thumb.CurrentX = thumb.StartX;
+                thumb.CurrentY = thumb.StartY;
+                thumb.CurrentWidth = thumb.StartWidth;
+                thumb.CurrentHeight = thumb.StartHeight;
+            }
+
+            animStart = DateTime.Now;
+            lastDwmUpdate = DateTime.MinValue;
+
+            // Store callback
+            Action storedCallback = onComplete;
+
+            // Temporarily store the callback in a field so the rendering loop can access it
+            EventHandler renderHandler = null;
+            renderHandler = (s, e) =>
+            {
+                double elapsed = (DateTime.Now - animStart).TotalSeconds;
+                double progress = Math.Min(elapsed / ANIMATION_DURATION, 1.0);
+                double eased = 1 - Math.Pow(1 - progress, 3);
+
+                // Animate blur BACKWARDS (from blurred to clear)
+                currentBlurRadius = Lerp(TARGET_BLUR_RADIUS, 0, eased);
+                if (BackgroundImage.Effect is BlurEffect blurEffect)
+                {
+                    blurEffect.Radius = currentBlurRadius;
+                }
+
+                var now = DateTime.Now;
+                bool canUpdateDwm = (lastDwmUpdate == DateTime.MinValue) ||
+                                    (now - lastDwmUpdate).TotalMilliseconds >= DWM_UPDATE_MIN_MS;
+
+                foreach (var thumb in windowThumbs)
+                {
+                    thumb.CurrentX = Lerp(thumb.StartX, thumb.TargetX, eased);
+                    thumb.CurrentY = Lerp(thumb.StartY, thumb.TargetY, eased);
+                    thumb.CurrentWidth = Lerp(thumb.StartWidth, thumb.TargetWidth, eased);
+                    thumb.CurrentHeight = Lerp(thumb.StartHeight, thumb.TargetHeight, eased);
+
+                    if (canUpdateDwm)
+                    {
+                        UpdateThumbnailPosition(thumb);
+                    }
+                }
+
+                if (canUpdateDwm)
+                    lastDwmUpdate = now;
+
+                if (progress >= 1.0)
+                {
+                    CompositionTarget.Rendering -= renderHandler;
+                    isReturningToOriginal = false;
+                    storedCallback?.Invoke();
+                }
+            };
+
+            CompositionTarget.Rendering += renderHandler;
+        }
+
+        private void RefreshThumbnail(WindowThumb thumb)
+        {
+            // Force DWM to update the thumbnail by re-registering it
+            try
+            {
+                if (thumb.ThumbnailHandle != IntPtr.Zero)
+                {
+                    // Update properties to force a refresh
+                    UpdateThumbnailPosition(thumb);
+                }
+            }
+            catch { }
         }
 
         #endregion
