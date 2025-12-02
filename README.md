@@ -1,6 +1,6 @@
 # windows-expose-clone
 
-![Desktop 2025 12 02 - 08 07 20 01](https://github.com/user-attachments/assets/d2bfcc25-70e4-4e39-90d7-571abb33b8a8)
+![Desktop 2025 12 02 - 09 03 10 03](https://github.com/user-attachments/assets/d14417ec-78f6-4bd7-ba31-20aa64cc0066)
 
 A macOS Exposé-style window switcher for Windows 11.
 
@@ -27,4 +27,5 @@ A macOS Exposé-style window switcher for Windows 11.
 
 ## License
 MIT
+
 
