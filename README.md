@@ -1,5 +1,7 @@
 # windows-expose-clone
 
+![Desktop 2025 12 02 - 09 03 10 03](https://github.com/user-attachments/assets/d14417ec-78f6-4bd7-ba31-20aa64cc0066)
+
 A macOS Exposé-style window switcher for Windows 11.
 
 ## Features
@@ -11,7 +13,7 @@ A macOS Exposé-style window switcher for Windows 11.
 
 ## Requirements
 - Windows 11 (or Windows 10)
-- .NET Framework 4.7.2+
+- .NET Framework 8+
 
 ## Installation
 1. Download the latest release
@@ -25,3 +27,5 @@ A macOS Exposé-style window switcher for Windows 11.
 
 ## License
 MIT
+
+
