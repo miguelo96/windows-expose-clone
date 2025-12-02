@@ -11,7 +11,7 @@ A macOS Exposé-style window switcher for Windows 11.
 
 ## Requirements
 - Windows 11 (or Windows 10)
-- .NET Framework 4.7.2+
+- .NET Framework 8+
 
 ## Installation
 1. Download the latest release
