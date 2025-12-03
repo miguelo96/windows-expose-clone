@@ -614,10 +614,6 @@ namespace WindowScatter
 
             try
             {
-                // Wake the window
-                ShowWindow(windowHandle, SW_RESTORE);
-                SetForegroundWindow(windowHandle);
-
                 var clickedThumb = windowThumbs.FirstOrDefault(t => t.WindowHandle == windowHandle);
                 if (clickedThumb == null)
                 {
@@ -633,33 +629,60 @@ namespace WindowScatter
                 windowThumbs.Remove(clickedThumb);
                 windowThumbs.Add(clickedThumb);
 
-                // Enforce Z-order
+                // DON'T activate yet - just set Z-order without activation
                 SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
                 SetWindowPos(windowHandle, HWND_NOTOPMOST, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
-                // Give Windows time to settle
-                Task.Delay(10).ContinueWith(_ =>
+                // Capture state IMMEDIATELY before the window realizes what's happening
+                Task.Run(() =>
                 {
+                    // Capture ALL positions RIGHT NOW while windows are still scattered
+                    var capturedStates = new List<(IntPtr handle, double x, double y, double w, double h)>();
+
+                    foreach (var thumb in windowThumbs)
+                    {
+                        RECT rect;
+                        if (GetWindowRect(thumb.WindowHandle, out rect))
+                        {
+                            capturedStates.Add((
+                                thumb.WindowHandle,
+                                rect.Left,
+                                rect.Top,
+                                rect.Right - rect.Left,
+                                rect.Bottom - rect.Top
+                            ));
+                        }
+                    }
+
+                    // NOW we can wake the bastard up
+                    ShowWindow(windowHandle, SW_RESTORE);
+
+                    // Small delay to let it process the restore
+                    System.Threading.Thread.Sleep(10);
+
                     Dispatcher.Invoke(() =>
                     {
                         try
                         {
-                            // Recapture positions
+                            // Apply captured positions to thumbnails
+                            foreach (var state in capturedStates)
+                            {
+                                var thumb = windowThumbs.FirstOrDefault(t => t.WindowHandle == state.handle);
+                                if (thumb != null)
+                                {
+                                    thumb.StartX = state.x;
+                                    thumb.StartY = state.y;
+                                    thumb.StartWidth = state.w;
+                                    thumb.StartHeight = state.h;
+                                }
+                            }
+
+                            // Re-register thumbnails with captured positions
                             foreach (var thumb in windowThumbs)
                             {
-                                RECT rect;
-                                if (GetWindowRect(thumb.WindowHandle, out rect))
-                                {
-                                    thumb.StartX = rect.Left;
-                                    thumb.StartY = rect.Top;
-                                    thumb.StartWidth = rect.Right - rect.Left;
-                                    thumb.StartHeight = rect.Bottom - rect.Top;
-                                }
-
-                                // Re-register thumbnail
                                 if (thumb.ThumbnailHandle != IntPtr.Zero)
                                     DwmUnregisterThumbnail(thumb.ThumbnailHandle);
 
@@ -680,9 +703,9 @@ namespace WindowScatter
                                 Dispatcher.BeginInvoke(new Action(() =>
                                 {
                                     Cleanup();
+                                    // NOW give it focus after animation completes
                                     SetForegroundWindow(windowHandle);
 
-                                    // FIXED: Clear transition flag AFTER cleanup
                                     lock (transitionLock) { isTransitioning = false; }
                                 }), DispatcherPriority.Background);
                             });
