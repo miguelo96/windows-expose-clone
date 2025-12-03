@@ -52,6 +52,13 @@ namespace WindowScatter
         private string lastWallpaperPath = null;
         private WallpaperManager wallpaperManager;
 
+        private bool isScatterActive = false;
+        private bool isAnimatingBack = false;
+
+        // NEW: Prevent click spam during transitions
+        private bool isTransitioning = false;
+        private object transitionLock = new object();
+
         // Settings
         private AppSettings settings;
 
@@ -177,7 +184,8 @@ namespace WindowScatter
 
                         this.Dispatcher.BeginInvoke(new Action(async () =>
                         {
-                            if (this.Visibility == Visibility.Hidden)
+                            // FIXED: Check isTransitioning too
+                            if (this.Visibility == Visibility.Hidden && !isScatterActive && !isAnimatingBack && !isTransitioning)
                             {
                                 await StartScatterAsync();
                                 this.Visibility = Visibility.Visible;
@@ -247,13 +255,10 @@ namespace WindowScatter
 
         #region Event Handlers
 
-        private async void Window_KeyDown(object sender, KeyEventArgs e)
+        private void Window_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Space)
-            {
-                await StartScatterAsync();
-            }
-            else if (e.Key == Key.Escape)
+            // FIXED: Reject ESC spam during transitions
+            if (e.Key == Key.Escape && !isAnimatingBack && !isTransitioning)
             {
                 CleanupAndClose();
             }
@@ -279,58 +284,67 @@ namespace WindowScatter
 
         private async System.Threading.Tasks.Task StartScatterAsync()
         {
-            var helper = new WindowInteropHelper(this);
-            IntPtr ourHwnd = helper.EnsureHandle();
-
-            if (ourHwnd == IntPtr.Zero)
+            if (isScatterActive || isAnimatingBack || isTransitioning) return;
+            isScatterActive = true;
+            try
             {
-                MessageBox.Show("Window handle fucked!", "Error");
-                return;
+                var helper = new WindowInteropHelper(this);
+                IntPtr ourHwnd = helper.EnsureHandle();
+
+                if (ourHwnd == IntPtr.Zero)
+                {
+                    MessageBox.Show("Window handle fucked!", "Error");
+                    return;
+                }
+
+                Cleanup();
+
+                var windows = EnumerateWindows();
+                if (windows.Count == 0)
+                {
+                    MessageBox.Show("No windows found!", "Info");
+                    return;
+                }
+
+                if (windows.Count > MAX_WINDOWS)
+                    windows = windows.GetRange(0, MAX_WINDOWS);
+
+                var currentHandles = windows.Select(w => w.Handle).ToList();
+                bool windowStateChanged = HasWindowStateChanged(currentHandles);
+
+                double screenW = SystemParameters.PrimaryScreenWidth;
+                double screenH = SystemParameters.PrimaryScreenHeight;
+
+                List<WindowLayout> layouts;
+
+                if (!windowStateChanged && cachedLayouts != null)
+                {
+                    layouts = ReuseCachedLayouts(windows);
+                }
+                else
+                {
+                    layouts = CalculateNewLayouts(windows, screenW, screenH);
+                    cachedLayouts = new List<WindowLayout>(layouts);
+                    lastWindowHandles = currentHandles;
+                }
+
+                SetWindowPos(ourHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                RegisterThumbnails(layouts, ourHwnd);
+
+                if (windowThumbs.Count == 0)
+                {
+                    MessageBox.Show("No windows captured!", "Info");
+                    return;
+                }
+
+                animStart = DateTime.Now;
+                lastDwmUpdate = DateTime.MinValue;
+                CompositionTarget.Rendering += CompositionTarget_Rendering;
             }
-
-            Cleanup();
-
-            var windows = EnumerateWindows();
-            if (windows.Count == 0)
+            finally
             {
-                MessageBox.Show("No windows found!", "Info");
-                return;
+                isScatterActive = false;
             }
-
-            if (windows.Count > MAX_WINDOWS)
-                windows = windows.GetRange(0, MAX_WINDOWS);
-
-            var currentHandles = windows.Select(w => w.Handle).ToList();
-            bool windowStateChanged = HasWindowStateChanged(currentHandles);
-
-            double screenW = SystemParameters.PrimaryScreenWidth;
-            double screenH = SystemParameters.PrimaryScreenHeight;
-
-            List<WindowLayout> layouts;
-
-            if (!windowStateChanged && cachedLayouts != null)
-            {
-                layouts = ReuseC​achedLayouts(windows);
-            }
-            else
-            {
-                layouts = CalculateNewLayouts(windows, screenW, screenH);
-                cachedLayouts = new List<WindowLayout>(layouts);
-                lastWindowHandles = currentHandles;
-            }
-
-            SetWindowPos(ourHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-            RegisterThumbnails(layouts, ourHwnd);
-
-            if (windowThumbs.Count == 0)
-            {
-                MessageBox.Show("No windows captured!", "Info");
-                return;
-            }
-
-            animStart = DateTime.Now;
-            lastDwmUpdate = DateTime.MinValue;
-            CompositionTarget.Rendering += CompositionTarget_Rendering;
         }
 
         private List<WindowInfo> EnumerateWindows()
@@ -399,7 +413,7 @@ namespace WindowScatter
                    !lastWindowHandles.SequenceEqual(currentHandles);
         }
 
-        private List<WindowLayout> ReuseC​achedLayouts(List<WindowInfo> windows)
+        private List<WindowLayout> ReuseCachedLayouts(List<WindowInfo> windows)
         {
             var layouts = new List<WindowLayout>(cachedLayouts);
             var windowsByHandle = windows.ToDictionary(w => w.Handle);
@@ -480,6 +494,13 @@ namespace WindowScatter
 
                 clickBorder.MouseDown += (s, e) =>
                 {
+                    // FIXED: Ignore ALL clicks during any state transition
+                    if (isScatterActive || isAnimatingBack || isTransitioning)
+                    {
+                        e.Handled = true;
+                        return;
+                    }
+
                     SwitchToWindow(thumb.WindowHandle);
                     e.Handled = true;
                 };
@@ -582,77 +603,116 @@ namespace WindowScatter
 
         private void SwitchToWindow(IntPtr windowHandle)
         {
-            // Yes Windows, wake the hell up
-            ShowWindow(windowHandle, SW_RESTORE);
-            SetForegroundWindow(windowHandle);
-
-            var clickedThumb = windowThumbs.FirstOrDefault(t => t.WindowHandle == windowHandle);
-            if (clickedThumb == null)
-                return;
-
-            // Bring its Border to the top of the canvas z-order
-            ScatterCanvas.Children.Remove(clickedThumb.ClickBorder);
-            ScatterCanvas.Children.Add(clickedThumb.ClickBorder);
-
-            // Maintain order in the list
-            windowThumbs.Remove(clickedThumb);
-            windowThumbs.Add(clickedThumb);
-
-            // Now enforce Z-order because Windows is a gremlin
-            SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-            SetWindowPos(windowHandle, HWND_NOTOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-            // Give Windows a microsecond to stop tripping over itself
-            Task.Delay(10).ContinueWith(_ =>
+            // FIXED: Use lock to prevent concurrent transitions
+            lock (transitionLock)
             {
-                Dispatcher.Invoke(() =>
+                if (isAnimatingBack || isScatterActive || isTransitioning)
+                    return;
+
+                isTransitioning = true;
+            }
+
+            try
+            {
+                // Wake the window
+                ShowWindow(windowHandle, SW_RESTORE);
+                SetForegroundWindow(windowHandle);
+
+                var clickedThumb = windowThumbs.FirstOrDefault(t => t.WindowHandle == windowHandle);
+                if (clickedThumb == null)
                 {
-                    // Recapture ACTUAL position of every window
-                    foreach (var thumb in windowThumbs)
+                    lock (transitionLock) { isTransitioning = false; }
+                    return;
+                }
+
+                // Bring its Border to the top of the canvas z-order
+                ScatterCanvas.Children.Remove(clickedThumb.ClickBorder);
+                ScatterCanvas.Children.Add(clickedThumb.ClickBorder);
+
+                // Maintain order in the list
+                windowThumbs.Remove(clickedThumb);
+                windowThumbs.Add(clickedThumb);
+
+                // Enforce Z-order
+                SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+                SetWindowPos(windowHandle, HWND_NOTOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+                // Give Windows time to settle
+                Task.Delay(10).ContinueWith(_ =>
+                {
+                    Dispatcher.Invoke(() =>
                     {
-                        RECT rect;
-                        if (GetWindowRect(thumb.WindowHandle, out rect))
+                        try
                         {
-                            thumb.StartX = rect.Left;
-                            thumb.StartY = rect.Top;
-                            thumb.StartWidth = rect.Right - rect.Left;
-                            thumb.StartHeight = rect.Bottom - rect.Top;
+                            // Recapture positions
+                            foreach (var thumb in windowThumbs)
+                            {
+                                RECT rect;
+                                if (GetWindowRect(thumb.WindowHandle, out rect))
+                                {
+                                    thumb.StartX = rect.Left;
+                                    thumb.StartY = rect.Top;
+                                    thumb.StartWidth = rect.Right - rect.Left;
+                                    thumb.StartHeight = rect.Bottom - rect.Top;
+                                }
+
+                                // Re-register thumbnail
+                                if (thumb.ThumbnailHandle != IntPtr.Zero)
+                                    DwmUnregisterThumbnail(thumb.ThumbnailHandle);
+
+                                IntPtr newThumb;
+                                if (DwmRegisterThumbnail(new WindowInteropHelper(this).Handle,
+                                    thumb.WindowHandle, out newThumb) == 0)
+                                {
+                                    thumb.ThumbnailHandle = newThumb;
+                                    UpdateThumbnailPosition(thumb);
+                                }
+                            }
+
+                            // Animate back
+                            AnimateBackToOriginal(() =>
+                            {
+                                this.Visibility = Visibility.Hidden;
+
+                                Dispatcher.BeginInvoke(new Action(() =>
+                                {
+                                    Cleanup();
+                                    SetForegroundWindow(windowHandle);
+
+                                    // FIXED: Clear transition flag AFTER cleanup
+                                    lock (transitionLock) { isTransitioning = false; }
+                                }), DispatcherPriority.Background);
+                            });
                         }
-
-                        // Re-register the thumbnail so DWM stops gaslighting you
-                        if (thumb.ThumbnailHandle != IntPtr.Zero)
-                            DwmUnregisterThumbnail(thumb.ThumbnailHandle);
-
-                        IntPtr newThumb;
-                        if (DwmRegisterThumbnail(new WindowInteropHelper(this).Handle,
-                            thumb.WindowHandle, out newThumb) == 0)
+                        catch
                         {
-                            thumb.ThumbnailHandle = newThumb;
-                            UpdateThumbnailPosition(thumb);
+                            lock (transitionLock) { isTransitioning = false; }
                         }
-                    }
-
-                    // Now we can safely animate back
-                    AnimateBackToOriginal(() =>
-                    {
-                        this.Visibility = Visibility.Hidden;
-
-                        Dispatcher.BeginInvoke(new Action(() =>
-                        {
-                            Cleanup();
-                            SetForegroundWindow(windowHandle);
-                        }), DispatcherPriority.Background);
                     });
                 });
-            });
+            }
+            catch
+            {
+                lock (transitionLock) { isTransitioning = false; }
+            }
         }
 
 
         private void CleanupAndClose()
         {
+            // FIXED: Use lock for transition guard
+            lock (transitionLock)
+            {
+                if (isAnimatingBack || isTransitioning)
+                    return;
+
+                isAnimatingBack = true;
+                isTransitioning = true;
+            }
+
             AnimateBackToOriginal(() =>
             {
                 this.Visibility = Visibility.Hidden;
@@ -660,6 +720,13 @@ namespace WindowScatter
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     Cleanup();
+
+                    // FIXED: Clear both flags
+                    lock (transitionLock)
+                    {
+                        isAnimatingBack = false;
+                        isTransitioning = false;
+                    }
                 }), System.Windows.Threading.DispatcherPriority.Background);
             });
         }
@@ -702,7 +769,7 @@ namespace WindowScatter
             // Store callback
             Action storedCallback = onComplete;
 
-            // Temporarily store the callback in a field so the rendering loop can access it
+            // Rendering loop
             EventHandler renderHandler = null;
             renderHandler = (s, e) =>
             {
@@ -747,21 +814,6 @@ namespace WindowScatter
 
             CompositionTarget.Rendering += renderHandler;
         }
-
-        private void RefreshThumbnail(WindowThumb thumb)
-        {
-            // Force DWM to update the thumbnail by re-registering it
-            try
-            {
-                if (thumb.ThumbnailHandle != IntPtr.Zero)
-                {
-                    // Update properties to force a refresh
-                    UpdateThumbnailPosition(thumb);
-                }
-            }
-            catch { }
-        }
-
         #endregion
     }
 }
