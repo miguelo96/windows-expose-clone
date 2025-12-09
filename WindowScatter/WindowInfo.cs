@@ -9,18 +9,34 @@ namespace WindowScatter
         public IntPtr Handle;
         public string Title;
         public RECT OriginalRect;
+        public bool WasMaximized;
     }
 
-    internal class WindowThumb
+    public class WindowThumb
     {
-        public IntPtr WindowHandle;
-        public IntPtr ThumbnailHandle;
-        public bool WasMinimized;
-        public Border ClickBorder;
+        public IntPtr WindowHandle { get; set; }
+        public IntPtr ThumbnailHandle { get; set; }
+        public bool WasMinimized { get; set; }
+        public Border ClickBorder { get; set; }
 
-        public double StartX, StartY, StartWidth, StartHeight;
-        public double TargetX, TargetY, TargetWidth, TargetHeight;
-        public double CurrentX, CurrentY, CurrentWidth, CurrentHeight;
+        // NEW: Screenshot support
+        public System.Windows.Controls.Image ScreenshotImage { get; set; }
+        public bool IsUsingScreenshot { get; set; }
+
+        public double StartX { get; set; }
+        public double StartY { get; set; }
+        public double StartWidth { get; set; }
+        public double StartHeight { get; set; }
+
+        public double TargetX { get; set; }
+        public double TargetY { get; set; }
+        public double TargetWidth { get; set; }
+        public double TargetHeight { get; set; }
+
+        public double CurrentX { get; set; }
+        public double CurrentY { get; set; }
+        public double CurrentWidth { get; set; }
+        public double CurrentHeight { get; set; }
     }
 
     internal class WindowLayout
