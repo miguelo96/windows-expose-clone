@@ -53,6 +53,43 @@ namespace WindowScatter
         [DllImport("dwmapi.dll")]
         internal static extern int DwmQueryThumbnailSourceSize(IntPtr hThumb, out PSIZE size);
 
+        [DllImport("user32.dll")]
+        private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
+                                          IntPtr hdcSrc, int nXSrc, int nYSrc, uint dwRop);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetWindowDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        private const int SRCCOPY = 0x00CC0020;
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr BeginDeferWindowPos(int nNumWindows);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr DeferWindowPos(IntPtr hWinPosInfo, IntPtr hWnd,
+            IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll")]
+        internal static extern bool EndDeferWindowPos(IntPtr hWinPosInfo);
+
+        internal const uint SWP_NOREDRAW = 0x0008;
+
+        public const int SWP_HIDEWINDOW = 0x0080;
+
+
+
         [StructLayout(LayoutKind.Sequential)]
         internal struct DWM_THUMBNAIL_PROPERTIES
         {
@@ -92,6 +129,15 @@ namespace WindowScatter
         [DllImport("user32.dll")]
         internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll")]
+        internal static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        internal const int GWL_EXSTYLE = -20;
+        internal const int WS_EX_TOOLWINDOW = 0x00000080;
+
         internal const int WH_KEYBOARD_LL = 13;
         internal const int WM_KEYDOWN = 0x0100;
         internal const int WM_KEYUP = 0x0101;
@@ -126,6 +172,7 @@ namespace WindowScatter
         internal static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         internal static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
         internal static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
+        internal static readonly IntPtr HWND_TOP = new IntPtr(0);
 
         internal const uint SWP_NOMOVE = 0x0002;
         internal const uint SWP_NOSIZE = 0x0001;
@@ -147,6 +194,23 @@ namespace WindowScatter
         internal struct PSIZE
         {
             public int x, y;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+        internal const int SW_SHOWMAXIMIZED = 3;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct WINDOWPLACEMENT
+        {
+            public int length;
+            public int flags;
+            public int showCmd;
+            public System.Drawing.Point ptMinPosition;
+            public System.Drawing.Point ptMaxPosition;
+            public System.Drawing.Rectangle rcNormalPosition;
         }
 
         #endregion
