@@ -8,7 +8,7 @@ namespace WindowScatter
     public class AppSettings
     {
         public string Hotkey { get; set; } = "Win+W";
-        public bool EnableHotCorners { get; set; } = false;
+        public bool EnableHotCorners { get; set; } = true;
         public string HotCornerPosition { get; set; } = "TopLeft";
         public int HotCornerDelay { get; set; } = 500;
         public double AnimationSpeed { get; set; } = 0.25;
