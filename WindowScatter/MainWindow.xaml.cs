@@ -62,6 +62,9 @@ namespace WindowScatter
         // Settings
         private AppSettings settings;
 
+        // Hot Corners
+        private HotCornerManager hotCornerManager;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -97,6 +100,22 @@ namespace WindowScatter
 
             hookCallback = HookCallback;
             hookID = SetHook(hookCallback);
+
+            // NEW: Initialize hot corners
+            hotCornerManager = new HotCornerManager(settings, async () =>
+            {
+                await Dispatcher.InvokeAsync(async () =>
+                {
+                    if (this.Visibility == Visibility.Hidden && !isScatterActive && !isAnimatingBack && !isTransitioning)
+                    {
+                        await StartScatterAsync();
+                        this.Visibility = Visibility.Visible;
+                        this.Activate();
+                        this.Focus();
+                    }
+                });
+            });
+            hotCornerManager.Start();
         }
 
         #region Wallpaper Monitoring
@@ -268,6 +287,7 @@ namespace WindowScatter
         {
             hwndSource?.RemoveHook(WndProc);
             wallpaperCheckTimer?.Stop();
+            hotCornerManager?.Stop();  // NEW: Stop hot corner monitoring
 
             if (hookID != IntPtr.Zero)
             {
@@ -376,11 +396,22 @@ namespace WindowScatter
 
                         if (width >= 100 && height >= 100)
                         {
+                            // NEW: Check if window is maximized
+                            WINDOWPLACEMENT placement = new WINDOWPLACEMENT();
+                            placement.length = Marshal.SizeOf(placement);
+                            bool isMaximized = false;
+
+                            if (GetWindowPlacement(h, ref placement))
+                            {
+                                isMaximized = (placement.showCmd == SW_SHOWMAXIMIZED);
+                            }
+
                             windows.Add(new WindowInfo
                             {
                                 Handle = h,
                                 Title = title,
-                                OriginalRect = rect
+                                OriginalRect = rect,
+                                WasMaximized = isMaximized  // NEW: Store maximized state
                             });
                         }
                     }
@@ -629,12 +660,20 @@ namespace WindowScatter
                 windowThumbs.Remove(clickedThumb);
                 windowThumbs.Add(clickedThumb);
 
-                // DON'T activate yet - just set Z-order without activation
-                SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                // SAFELY bump DWM Z-order of the clicked window
+                if (clickedThumb.ThumbnailHandle != IntPtr.Zero)
+                {
+                    DwmUnregisterThumbnail(clickedThumb.ThumbnailHandle);
+                    clickedThumb.ThumbnailHandle = IntPtr.Zero;
+                }
 
-                SetWindowPos(windowHandle, HWND_NOTOPMOST, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                IntPtr newThumb;
+                if (DwmRegisterThumbnail(new WindowInteropHelper(this).Handle,
+                    clickedThumb.WindowHandle, out newThumb) == 0)
+                {
+                    clickedThumb.ThumbnailHandle = newThumb;
+                    UpdateThumbnailPosition(clickedThumb);
+                }
 
                 // Capture state IMMEDIATELY before the window realizes what's happening
                 Task.Run(() =>
@@ -657,11 +696,12 @@ namespace WindowScatter
                         }
                     }
 
-                    // NOW we can wake the bastard up
-                    ShowWindow(windowHandle, SW_RESTORE);
+                    // Check if window was maximized
+                    var layout = cachedLayouts?.FirstOrDefault(l => l.Window.Handle == windowHandle);
+                    bool wasMaximized = layout != null && layout.Window.WasMaximized;
 
-                    // Small delay to let it process the restore
-                    System.Threading.Thread.Sleep(10);
+                    // Small delay BEFORE any window operations
+                    System.Threading.Thread.Sleep(5);
 
                     Dispatcher.Invoke(() =>
                     {
@@ -683,32 +723,48 @@ namespace WindowScatter
                             // Re-register thumbnails with captured positions
                             foreach (var thumb in windowThumbs)
                             {
-                                if (thumb.ThumbnailHandle != IntPtr.Zero)
-                                    DwmUnregisterThumbnail(thumb.ThumbnailHandle);
-
-                                IntPtr newThumb;
-                                if (DwmRegisterThumbnail(new WindowInteropHelper(this).Handle,
-                                    thumb.WindowHandle, out newThumb) == 0)
+                                if (thumb.ThumbnailHandle == IntPtr.Zero)
                                 {
-                                    thumb.ThumbnailHandle = newThumb;
-                                    UpdateThumbnailPosition(thumb);
+                                    IntPtr thumbHandle;
+                                    if (DwmRegisterThumbnail(new WindowInteropHelper(this).Handle,
+                                        thumb.WindowHandle, out thumbHandle) == 0)
+                                    {
+                                        thumb.ThumbnailHandle = thumbHandle;
+                                    }
                                 }
+
+                                UpdateThumbnailPosition(thumb);
                             }
 
-                            // Animate back
-                            AnimateBackToOriginal(() =>
+                            // Start animation FIRST, THEN restore window
+                            AnimateBackToOriginal(async () =>
                             {
+                                // Wait for animation to complete
+                                await System.Threading.Tasks.Task.Delay(15);
+
+                                // NOW restore the window AFTER we're hidden
+                                if (wasMaximized)
+                                {
+                                    ShowWindow(windowHandle, SW_SHOWMAXIMIZED);
+                                }
+                                else
+                                {
+                                    ShowWindow(windowHandle, SW_RESTORE);
+                                }
+
+                                SetForegroundWindow(windowHandle);
+
                                 this.Visibility = Visibility.Hidden;
+
+                                await System.Threading.Tasks.Task.Delay(15);
 
                                 Dispatcher.BeginInvoke(new Action(() =>
                                 {
                                     Cleanup();
-                                    // NOW give it focus after animation completes
-                                    SetForegroundWindow(windowHandle);
-
                                     lock (transitionLock) { isTransitioning = false; }
                                 }), DispatcherPriority.Background);
                             });
+
                         }
                         catch
                         {
@@ -736,22 +792,24 @@ namespace WindowScatter
                 isTransitioning = true;
             }
 
-            AnimateBackToOriginal(() =>
+            AnimateBackToOriginal(async () =>
             {
                 this.Visibility = Visibility.Hidden;
+
+                await System.Threading.Tasks.Task.Delay(15);
 
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     Cleanup();
 
-                    // FIXED: Clear both flags
                     lock (transitionLock)
                     {
                         isAnimatingBack = false;
                         isTransitioning = false;
                     }
-                }), System.Windows.Threading.DispatcherPriority.Background);
+                }), DispatcherPriority.Background);
             });
+
         }
 
         private void AnimateBackToOriginal(Action onComplete)
